@@ -147,7 +147,8 @@ my @tests_memory = (
             'channel' => 'msg',
         } => qr/^$irclogs_foswiki \(channel #foswiki\)$/,
     ],
-    [ { 'body' => $item1234, } => $title1234, ],
+    [ { 'body' => 'Item1234', } => $wikiItem1234, ],
+    [ { 'body' => $item1234, }  => $title1234, ],
 );
 
 my @tests_storable = (
@@ -244,36 +245,62 @@ qq{Answer to "$t->[0]->{raw_body}" on channel $t->[0]->{channel}}
 
 # create a mock bot with parameterizable backend and Foswiki module loaded
 sub new_foswiki_bot {
-    my $backend = shift;
+    my $store   = shift;
     my $options = shift;
     my $bot;
     {
         $SIG{__WARN__} = sub {
             warn @_
               unless $_[0] =~
-m#^Loading Foswiki from Bot/BasicBot/Pluggable/Module/Foswiki.pm at \S+ line \d+\.$#;
+m#^Loading Foswiki from Bot/BasicBot/Pluggable/Module/Foswiki.pm at \S+ line \d+\.$#
+                  || $_[0] =~
+m#^Subroutine \w+ redefined at \S+/Bot/BasicBot/Pluggable/Module/Foswiki.pm line \d+\.$#;
         };
 
         $bot = Bot::BasicBot::Pluggable->new(
-            store       => $backend,
+            store       => $store,
             nick        => 'bam',
             ignore_nick => 'ignore_me',
         );
     }
     no warnings 'redefine';
     my $mod = $bot->load('Foswiki');
-    $mod->set(%$options);
+    $mod->set( $_ => $options->{$_} ) for keys %$options;
     return $bot;
 }
 
-my $memory_bot = new_foswiki_bot( Memory => { title_delay => -1 } );
+diag 'Doing memory tests';
+my $memory_bot = new_foswiki_bot(
+    Memory => {
+        url_delay   => -1,
+        title_delay => -1
+    }
+);
+check_told( $memory_bot, \@tests_memory );
+$memory_bot->shutdown('Shutting down MemoryBot');
+
+diag 'Doing once more memory tests';
+$memory_bot = new_foswiki_bot(
+    Memory => {
+        url_delay   => -1,
+        title_delay => -1
+    }
+);
 check_told( $memory_bot, \@tests_memory );
 $memory_bot->shutdown();
 
-my $storable_bot = new_foswiki_bot( Storable => { title_delay => -1 } );
+diag 'Doing Storable tests';
+unlink 'Foswiki.storable';
+my $storable_bot = new_foswiki_bot(
+    Storable => {
+        url_delay   => -1,
+        title_delay => -1
+    }
+);
 check_told( $storable_bot, \@tests_memory );
 $storable_bot->shutdown();
 
-$storable_bot = new_foswiki_bot( Memory => { title_delay => -1 } );
+diag 'Doing real Storable tests';
+$storable_bot = new_foswiki_bot( Storable => {} );
 check_told( $storable_bot, \@tests_storable );
 $storable_bot->shutdown();

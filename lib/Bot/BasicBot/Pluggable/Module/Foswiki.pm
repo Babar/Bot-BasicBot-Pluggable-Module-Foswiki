@@ -21,15 +21,20 @@ my $http_pattern    = qr#https?://#;
 
 sub init {
     my $self = shift;
+    $self->{titles} = {};
+    $self->{cache}  = {};
     $self->config(
         {
-            user_log_link => 'http://irclogs.foswiki.org/bin/irclogger_log/',
-            user_log_date_format => '%Y-%m-%d,%a',
-            user_title_expire    => 86400,
-            user_title_delay     => 1800,
-            user_asciify         => 1,
-            user_ignore_re       => '',
-            user_be_rude         => 0,
+            log_link        => 'http://irclogs.foswiki.org/bin/irclogger_log/',
+            log_date_format => '%Y-%m-%d,%a',
+            title_expire    => 86400,
+            url_delay       => 1800,
+            title_delay     => 1800,
+            asciify         => 1,
+            ignore_re       => undef,
+            be_rude         => 0,
+            github_nick     => 'GithubBot',
+            github_ignore   => qr#http://bit\.ly/#,
         }
     );
     $self->_get_pattern(1);
@@ -77,11 +82,14 @@ sub told {
         $channel = '' if $channel eq 'msg';
         $reply = $self->_logtime($channel);
     }
-    elsif (@uris) {
-        $reply = join ", ", map $self->_get_title($_, $mess), @uris;
-    }
-    else {    # means matched pattern
-        $reply = $self->_replace_patterns($body, $mess);
+    else {
+        my @replies;
+        for my $uri (@uris) {
+            push @replies, $self->_get_title( $uri, $mess );
+            $body =~ s/$uri//;
+        }
+        push @replies, $self->_replace_patterns( $body, $mess );
+        $reply = join ' ', grep { defined && $_ ne '' } @replies;
     }
     return $reply;
 
@@ -106,7 +114,14 @@ sub _replace_patterns {
             if ( my @params = $body =~ $item->{pattern} ) {
                 my $reply = $item->{reply} || '';
                 $reply =~ s/\$param(\d+)/$params[$1-1] || ''/ge;
-                my $title = $self->_get_title($reply, $mess);
+
+                # Reply was said recently, skip it
+                next PATTERN
+                  if $self->{cache}->{$reply}
+                      && time() - $self->{cache}->{$reply} <
+                      $self->get('url_delay');
+                $self->{cache}->{$reply} = time();
+                my $title = $self->_get_title( $reply, $mess );
                 push @reply, "$reply $title";
                 $body =~ s/$item->{pattern}//;
                 $found++;
@@ -181,20 +196,22 @@ sub _get_title {
     my ( $self, $url, $mess ) = @_;
 
     # Check we do not ignore the URL
-    my $ignore_regexp = $self->get('user_ignore_re');
-    return '' if $url =~ /$ignore_regexp/;
+    my $ignore_regexp = $self->get('ignore_re');
+    return '' if defined $ignore_regexp && $url =~ /$ignore_regexp/;
 
     # Filter out file:// URLs
     my $uri = URI->new($url);
     return '' unless $uri && $uri->scheme;
     my $who = $mess->{who};
     if ( $uri->scheme eq "file" ) {
-        return '' unless $self->get("user_be_rude");
+        return '' unless $self->get("be_rude");
         return "Nice try $who, you tosser";
     }
 
     # Ignore github short url for commits
-    return if $who eq 'GithubBot' && $url =~ m#http://bit\.ly/#;
+    return ''
+      if $who eq $self->get('github_nick')
+          && $url =~ $self->get('github_ignore');
 
     # Now get the real title and cache it
     my $title = $self->{titles}->{$url};
@@ -202,10 +219,10 @@ sub _get_title {
 
         # Title was said recently, skip it
         return ''
-          if $title->{last_said} - time() < $self->get('user_title_delay');
+          if time() - $title->{last_said} < $self->get('title_delay');
 
         # Title is cached, say it
-        if ( $title->{cache} - time() < $self->get('user_title_expire') ) {
+        if ( time() - $title->{cache} < $self->get('title_expire') ) {
             $title->{last_said} = time();
             $self->{titles}->{$url} = $title;
             return $title->{text};
@@ -213,17 +230,17 @@ sub _get_title {
     }
 
     # Title is unknown, or cache is expired, get it
-    if( $title = title($url) ) {
-        $title = unidecode($title) if $self->get("user_asciify");
+    if ( $title = title($url) ) {
+        $title = unidecode($title) if $self->get("asciify");
         $title =~ s/ < \w+ < Foswiki$//;    # Remove breadcrumb
         $title = "[ $title ]";
     }
 
     # Update cache, and return title
     $self->{titles}->{$url} = {
-        text      => $title || '',
+        text => $title || '',
         cache     => time(),
-        last_said => time()
+        last_said => time(),
     };
     return $title;
 }
@@ -265,8 +282,8 @@ sub _logtime {
     return 'No channel specified, try: logtime <channel>' unless $channel;
     $channel =~ s/#//;
 
-    my $logDate = strftime( $self->get('user_log_date_format'), gmtime() );
-    my $reply = $self->get('user_log_link') . $channel . "?date=$logDate";
+    my $logDate = strftime( $self->get('log_date_format'), gmtime() );
+    my $reply = $self->get('log_link') . $channel . "?date=$logDate";
 
     my $ua       = $self->_get_ua;
     my $response = $ua->get($reply);
@@ -328,12 +345,12 @@ enhance.
 For the moment, only the logtime functionnality is configurable, rest being
 administered live.
 
-=head2 user_log_link
+=head2 log_link
 
 The base URL where the logs are accessible. Defaults to
 "http://irclogs.foswiki.org/bin/irclogger_log/".
 
-=head2 user_log_date_format
+=head2 log_date_format
 
 The date format used by the logger. Defaults to "%Y-%m-%d,%a".
 
