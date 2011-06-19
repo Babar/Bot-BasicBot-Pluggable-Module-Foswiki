@@ -3,16 +3,21 @@ package Bot::BasicBot::Pluggable::Module::Foswiki;
 use strict;
 use warnings;
 use Bot::BasicBot::Pluggable::Module;
-use Regexp::Assemble ();
-use LWP::UserAgent   ();
-use HTTP::Status     ();
+use LWP::UserAgent ();
+use HTTP::Status   ();
+use URI            ();
 use POSIX qw( strftime );
 use URI::Title qw(title);
+use URI::Find::Simple qw(list_uris);
+use Text::Unidecode qw(unidecode);
 
 our @ISA     = qw(Bot::BasicBot::Pluggable::Module);
 our $VERSION = '0.01';
 
-my $cmds = qr/add|list|remove|delete|help/;
+my $cmds            = qr/add|list|remove|delete|cache|help/;
+my $foswiki_command = qr/^\s*foswiki\W+($cmds)\W*(.*)/io;
+my $logtime_command = qr/^\s*(?:foswiki\s+|!)?logtime\W*(.*)/i;
+my $http_pattern    = qr#https?://#;
 
 sub init {
     my $self = shift;
@@ -20,8 +25,14 @@ sub init {
         {
             user_log_link => 'http://irclogs.foswiki.org/bin/irclogger_log/',
             user_log_date_format => '%Y-%m-%d,%a',
+            user_title_expire    => 86400,
+            user_title_delay     => 1800,
+            user_asciify         => 1,
+            user_ignore_re       => '',
+            user_be_rude         => 0,
         }
     );
+    $self->_get_pattern(1);
 }
 
 sub told {
@@ -33,36 +44,44 @@ sub told {
 
     my $body = $mess->{body};
     return if !$body;
-    my $pattern = $self->_get_pattern();
-    return
-      if $body !~ /^\s*foswiki\W+($cmds)\W*(.*)/io
-          && $body !~ /^\s*!?(logtime)\W*(.*)/i
-          && $body !~ $pattern;
-
-    # grab the parameter list
-    my ( $command, @args ) = ( $1 || 'help', split /\s+/, $2 || '' );
+    my $pattern = $self->_get_full_pattern();
+    my @uris    = list_uris($body);
+    return if $body !~ $pattern && !@uris;
 
     # compute the reply
     my $reply;
-    if ( $command =~ /^add$/i ) {
-        $reply = $self->_add_pattern(@args);
+    if ( $body =~ $foswiki_command ) {
+        my ( $command, @args ) = ( $1, split /\s+/, $2 || '' );
+        if ( $command =~ /^add$/i ) {
+            $reply = $self->_add_pattern(@args);
+        }
+        elsif ( $command =~ /^(?:remove|delete)$/i ) {
+            $reply = $self->_remove_pattern(@args);
+        }
+        elsif ( $command =~ /^list$/i ) {
+            $reply = $self->_list_patterns(@args);
+        }
+        elsif ( $command =~ /^help$/i ) {
+            $reply = $self->help(@args);
+        }
+        elsif ( $command =~ /^cache$/i ) {
+            $reply = $self->_cache(@args);
+        }
+        else {
+            $reply = "Sorry, I don't know the command '$command'.";
+        }
     }
-    elsif ( $command =~ /^(?:remove|delete)$/i ) {
-        $reply = $self->_remove_pattern(@args);
-    }
-    elsif ( $command =~ /^list$/i ) {
-        $reply = $self->_list_patterns(@args);
-    }
-    elsif ( $command =~ /^help$/i ) {
-        $reply = $self->help(@args);
-    }
-    elsif ( $command =~ /^logtime$/i ) {
-        my $channel = $args[0] || $mess->{channel};
+    elsif ( $body =~ $logtime_command ) {
+        my $channel = $1
+          || $mess->{channel};
         $channel = '' if $channel eq 'msg';
         $reply = $self->_logtime($channel);
     }
+    elsif (@uris) {
+        $reply = join ", ", map $self->_get_title($_, $mess), @uris;
+    }
     else {    # means matched pattern
-        $reply = $self->_replace_patterns( $body, @args );
+        $reply = $self->_replace_patterns($body, $mess);
     }
     return $reply;
 
@@ -74,7 +93,7 @@ sub emoted {
 }
 
 sub _replace_patterns {
-    my ( $self, $body, @args ) = @_;
+    my ( $self, $body, $mess ) = @_;
     my @reply;
 
     # Find the pattern back in the list
@@ -87,9 +106,8 @@ sub _replace_patterns {
             if ( my @params = $body =~ $item->{pattern} ) {
                 my $reply = $item->{reply} || '';
                 $reply =~ s/\$param(\d+)/$params[$1-1] || ''/ge;
-                my $title = title($reply);
-                $title =~ s/ < \w+ < Foswiki$//;
-                push @reply, "$reply - $title";
+                my $title = $self->_get_title($reply, $mess);
+                push @reply, "$reply $title";
                 $body =~ s/$item->{pattern}//;
                 $found++;
                 last PATTERN;
@@ -144,11 +162,70 @@ sub _get_pattern {
 
     # Build one RE from all patterns, for speed
     my $patterns = $self->_get_patterns();
-    my $ra       = Regexp::Assemble->new();
-    for my $item (@$patterns) {
-        $ra->add( $item->{pattern} );
+    my $ra = join "|", map $_->{pattern}, @$patterns;
+    $self->{pattern} = qr/$ra/;
+
+    # Add other function patterns to the full match
+    $ra = join "|", $ra, $foswiki_command, $logtime_command, $http_pattern;
+    $self->{full_pattern} = qr/$ra/;
+
+    return $self->{pattern};
+}
+
+sub _get_full_pattern {
+    my $self = shift;
+    return $self->{full_pattern};
+}
+
+sub _get_title {
+    my ( $self, $url, $mess ) = @_;
+
+    # Check we do not ignore the URL
+    my $ignore_regexp = $self->get('user_ignore_re');
+    return '' if $url =~ /$ignore_regexp/;
+
+    # Filter out file:// URLs
+    my $uri = URI->new($url);
+    return '' unless $uri && $uri->scheme;
+    my $who = $mess->{who};
+    if ( $uri->scheme eq "file" ) {
+        return '' unless $self->get("user_be_rude");
+        return "Nice try $who, you tosser";
     }
-    return $self->{pattern} = $ra->re;
+
+    # Ignore github short url for commits
+    return if $who eq 'GithubBot' && $url =~ m#http://bit\.ly/#;
+
+    # Now get the real title and cache it
+    my $title = $self->{titles}->{$url};
+    if ($title) {
+
+        # Title was said recently, skip it
+        return ''
+          if $title->{last_said} - time() < $self->get('user_title_delay');
+
+        # Title is cached, say it
+        if ( $title->{cache} - time() < $self->get('user_title_expire') ) {
+            $title->{last_said} = time();
+            $self->{titles}->{$url} = $title;
+            return $title->{text};
+        }
+    }
+
+    # Title is unknown, or cache is expired, get it
+    if( $title = title($url) ) {
+        $title = unidecode($title) if $self->get("user_asciify");
+        $title =~ s/ < \w+ < Foswiki$//;    # Remove breadcrumb
+        $title = "[ $title ]";
+    }
+
+    # Update cache, and return title
+    $self->{titles}->{$url} = {
+        text      => $title || '',
+        cache     => time(),
+        last_said => time()
+    };
+    return $title;
 }
 
 sub _list_patterns {
@@ -166,6 +243,11 @@ sub _list_patterns {
         }
     }
     return 'Currently watching ' . @list . ' patterns: ' . join( ", ", @list );
+}
+
+sub _cache {
+    my $self = shift;
+    return $self->_get_pattern();
 }
 
 sub _get_ua {
@@ -328,6 +410,6 @@ under the same terms as Perl itself.
 
 =head1 SEE ALSO
 
-L<Bot::BasicBot::Pluggable>, L<Regexp::Assemble>
+L<Bot::BasicBot::Pluggable>
 
 =cut
