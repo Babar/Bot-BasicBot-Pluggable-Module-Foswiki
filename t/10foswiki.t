@@ -183,7 +183,7 @@ my @tests_storable = (
             'body' =>
 'foswiki add item Item:?(\d+) http://foswiki.org/Tasks/Item$param1',
             'channel' => 'msg',
-        } => 'Added Foswiki pattern item (1 total).',
+        } => 'Added Foswiki pattern item (2 total).',
     ],
     [
         {
@@ -195,13 +195,13 @@ my @tests_storable = (
         {
             'body'    => 'foswiki add blonk blurp zlonk',
             'channel' => 'msg',
-        } => 'Added Foswiki pattern blonk (2 total).',
+        } => 'Added Foswiki pattern blonk (3 total).',
     ],
     [
         {
             'body'    => 'foswiki list',
             'channel' => 'msg',
-        } => 'Currently watching 2 patterns: item, blonk',
+        } => 'Currently watching 3 patterns: item, item, blonk',
     ],
     [
         { 'body' => 'foswiki list blonk', } =>
@@ -212,11 +212,11 @@ my @tests_storable = (
     [ { 'body' => 'blurp blonk Item:1234', } => $wikiItem1234 . ' zlonk ', ],
     [
         { 'body' => 'foswiki delete blonk', } =>
-          'Removed Foswiki pattern blonk (1 total).',
+          'Removed Foswiki pattern blonk (2 total).',
     ],
     [
         { 'body' => 'foswiki add blonk blonk zlonk', } =>
-          'Added Foswiki pattern blonk (2 total).',
+          'Added Foswiki pattern blonk (3 total).',
     ],
 );
 
